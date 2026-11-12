@@ -150,13 +150,15 @@
   .playbtn:active{transform:scale(.97)}
   .playbtn.playing{background:linear-gradient(145deg,#4FD6CA,#22AC9F);box-shadow:0 10px 24px rgba(48,192,180,.35)}
   .playbtn svg{width:22px;height:22px;fill:currentColor}
-  .subcontrols{display:flex;gap:8px;margin-top:10px}
+  .subcontrols{display:flex;gap:6px;margin-top:10px}
   .subcontrols button{
     flex:1;height:46px;border-radius:14px;background:#fff;box-shadow:var(--shadow-soft);
-    font-size:14px;font-weight:600;color:var(--ink-soft);
+    font-size:13px;font-weight:600;color:var(--ink-soft);min-width:0;white-space:nowrap;
   }
   .subcontrols button:active{transform:scale(.97)}
   .subcontrols .primary-ghost{color:var(--teal);background:var(--teal-soft);box-shadow:none}
+  .subcontrols .miss-ghost{color:#C2553B;background:#FBEFEC;box-shadow:none}
+  .subcontrols .miss-ghost.marked{color:#fff;background:#C2553B}
   .subcontrols .done-ghost{color:var(--orange-deep);background:var(--orange-soft);box-shadow:none}
 
   /* ---------- today's list ---------- */
@@ -179,6 +181,9 @@
     font-size:11px;display:flex;align-items:center;justify-content:center;flex:0 0 auto;font-variant-numeric:tabular-nums;
   }
   .row.cur .no{background:var(--orange);color:#fff}
+  .row.missed .no{background:#FBEFEC;color:#C2553B}
+  .row.missed .c{color:#C2553B}
+  .row.missed.cur{background:#FFF0EC}
   .row .c{font-size:24px;font-weight:700;width:34px;text-align:center;flex:0 0 auto;font-family:"Kaiti SC","STKaiti","KaiTi","PingFang SC",serif}
   .row .w{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
   .row .w span{font-size:13px;color:var(--ink-soft);background:#F9F4EC;padding:4px 9px;border-radius:8px;white-space:nowrap}
@@ -234,7 +239,12 @@
     .brand h1{font-size:17px}
     .playbtn{font-size:16px;height:58px}
     .sidebtn{font-size:13px}
+    .subcontrols button{font-size:12px}
     .charCard{min-height:220px}
+  }
+  @media (max-width:340px){
+    .subcontrols{gap:4px}
+    .subcontrols button{font-size:11.5px}
   }
   @media (prefers-reduced-motion: reduce){
     *{animation:none!important;transition:none!important}
@@ -288,6 +298,7 @@
     </section>
 
     <section class="subcontrols">
+      <button class="miss-ghost" id="unknownBtn" aria-pressed="false">不会</button>
       <button id="revealBtn">显示答案</button>
       <button id="repeatBtn">重听本字</button>
       <button class="done-ghost" id="doneBtn">完成这组 →</button>
@@ -295,7 +306,7 @@
 
     <details class="panel" id="listPanel">
       <summary>
-        <span>今天的 10 个字 · 点字可单听</span>
+        <span id="listTitle">今天的 10 个字 · 点字可单听</span>
         <span class="chev">⌄</span>
       </summary>
       <div class="list" id="listRows"></div>
@@ -306,7 +317,7 @@
       </div>
     </details>
 
-    <p class="foot">字表依据人教部编版教材附录整理 · 每天 10 字自动循环<br>用 Safari / Chrome 打开，可「添加到主屏幕」像 App 一样使用</p>
+    <p class="foot">字表依据人教部编版教材附录整理 · 每天 10 字自动循环<br>点「不会」的字会进入下一轮复习<br>用 Safari / Chrome 打开，可「添加到主屏幕」像 App 一样使用</p>
   </main>
 </div>
 
@@ -403,6 +414,7 @@
     prevBtn: $('#prevBtn'), nextBtn: $('#nextBtn'), playBtn: $('#playBtn'),
     playLabel: $('#playLabel'), playIcon: $('#playIcon'),
     revealBtn: $('#revealBtn'), repeatBtn: $('#repeatBtn'), doneBtn: $('#doneBtn'),
+    unknownBtn: $('#unknownBtn'), listTitle: $('#listTitle'),
     prevGroupBtn: $('#prevGroupBtn'), shuffleBtn: $('#shuffleBtn'), resetBtn: $('#resetBtn'),
     settingsBtn: $('#settingsBtn'), mask: $('#mask'), sheet: $('#sheet'), sheetClose: $('#sheetClose'),
     sheetReset: $('#sheetReset'), toast: $('#toast'),
@@ -423,7 +435,9 @@
     reveal: 'manual',
     order: 'seq',
     progress: {},       // key -> {offset, date}
-    random: {}          // key -> array of indices
+    random: {},         // key -> array of indices
+    missed: [],         // chars marked "不会" in the current round
+    roundChars: null    // review round chars, null = today's full group
   };
 
   function loadState(){
@@ -431,10 +445,15 @@
       const raw = localStorage.getItem(LS_KEY);
       if(!raw) return {...DEFAULTS};
       const s = JSON.parse(raw);
-      return Object.assign({}, DEFAULTS, s, {
+      const merged = Object.assign({}, DEFAULTS, s, {
         progress: Object.assign({}, s.progress || {}),
         random: Object.assign({}, s.random || {})
       });
+      merged.missed = Array.isArray(s.missed) ? s.missed.filter(c => typeof c === 'string') : [];
+      merged.roundChars = Array.isArray(s.roundChars) && s.roundChars.length
+        ? s.roundChars.filter(c => typeof c === 'string')
+        : null;
+      return merged;
     }catch(e){ return {...DEFAULTS}; }
   }
   let state = loadState();
@@ -485,6 +504,57 @@
     return { group, start, day, total, all };
   }
 
+  function uniqChars(chars){
+    const out = [];
+    (chars || []).forEach(c => {
+      if(typeof c === 'string' && !out.includes(c)) out.push(c);
+    });
+    return out;
+  }
+  function currentItems(){
+    const g = groupInfo();
+    if(!Array.isArray(state.roundChars) || state.roundChars.length === 0) return g.group;
+    const byChar = new Map(g.group.map(it => [it.c, it]));
+    const seen = new Set();
+    const items = [];
+    state.roundChars.forEach(c => {
+      const it = byChar.get(c);
+      if(it && !seen.has(it.c)){ seen.add(it.c); items.push(it); }
+    });
+    if(!items.length){
+      state.roundChars = null;
+      save();
+      return g.group;
+    }
+    if(items.length !== state.roundChars.length){
+      state.roundChars = items.map(it => it.c);
+      save();
+    }
+    return items;
+  }
+  function isReviewRound(){
+    return Array.isArray(state.roundChars) && state.roundChars.length > 0;
+  }
+  function nextRound(){
+    const wasReview = isReviewRound();
+    const g = groupInfo();
+    const allowed = new Set(g.group.map(it => it.c));
+    const missed = uniqChars(state.missed).filter(c => allowed.has(c));
+    state.missed = [];
+    if(missed.length){
+      state.roundChars = missed;
+      state.idx = 0;
+      save();
+      toast('进入复习轮 · ' + missed.length + ' 个字');
+      return true;
+    }
+    state.roundChars = null;
+    state.idx = 0;
+    save();
+    toast(wasReview ? '复习完成，回到今天的 ' + g.group.length + ' 个字' : '这一轮完成，再来一遍');
+    return false;
+  }
+
   /* ---------------- word / voice ---------------- */
   let voice = null;
   function pickVoice(){
@@ -513,8 +583,8 @@
     document.body.classList.remove('speaking');
   }
   function currentItem(){
-    const g = groupInfo();
-    return g.group[state.idx] || g.group[0];
+    const items = currentItems();
+    return items[state.idx] || items[0];
   }
   function speakTextFor(it){
     if(state.speak === 'char') return it.c;
@@ -576,7 +646,9 @@
       btn.onclick = () => {
         if(state.book === b.id) return;
         stopPlay();
-        state.book = b.id; save(); state.idx = 0; revealed = false; render();
+        state.book = b.id;
+        state.roundChars = null; state.missed = [];
+        save(); state.idx = 0; revealed = false; render();
       };
       els.bookChips.appendChild(btn);
     });
@@ -594,7 +666,9 @@
       btn.onclick = () => {
         if(state.kind === k) return;
         stopPlay();
-        state.kind = k; save(); state.idx = 0; revealed = false; render();
+        state.kind = k;
+        state.roundChars = null; state.missed = [];
+        save(); state.idx = 0; revealed = false; render();
       };
       els.typeChips.appendChild(btn);
     });
@@ -608,6 +682,13 @@
   }
 
   let revealed = false;
+  function updateUnknownBtn(){
+    const it = currentItem();
+    const marked = !!it && state.missed.includes(it.c);
+    els.unknownBtn.textContent = marked ? '已标记' : '不会';
+    els.unknownBtn.classList.toggle('marked', marked);
+    els.unknownBtn.setAttribute('aria-pressed', marked ? 'true' : 'false');
+  }
   function applyReveal(){
     const show = revealed || state.reveal === 'always';
     const it = currentItem();
@@ -617,33 +698,36 @@
     els.wordsLine.innerHTML = it.w.map(w => '<span>' + w + '</span>').join('');
     els.hint.textContent = show ? '点卡片可隐藏答案' : '答案已隐藏，点击卡片显示';
     els.revealBtn.textContent = show ? '隐藏答案' : '显示答案';
+    updateUnknownBtn();
   }
 
   function render(){
-    const g = groupInfo();
-    if(!Number.isInteger(state.idx) || state.idx < 0 || state.idx >= g.group.length) state.idx = 0;
-    const it = g.group[state.idx];
+    const items = currentItems();
+    if(!Number.isInteger(state.idx) || state.idx < 0 || state.idx >= items.length) state.idx = 0;
+    const it = items[state.idx];
     els.charBig.textContent = it.c;
     els.wordsLine.innerHTML = it.w.map(w => '<span>' + w + '</span>').join('');
-    els.progressLabel.textContent = (state.idx + 1) + ' / ' + g.group.length;
+    els.progressLabel.textContent = (isReviewRound() ? '复习 ' : '') + (state.idx + 1) + ' / ' + items.length;
+    els.listTitle.textContent = (isReviewRound() ? '复习轮 · ' : '今天的 ') + items.length + ' 个字 · 点字可单听';
     els.dots.innerHTML = '';
-    g.group.forEach((x, i) => {
+    items.forEach((x, i) => {
       const d = document.createElement('div');
       d.className = 'dot' + (i === state.idx ? ' cur' : '') + (i < state.idx ? ' done' : '');
       d.textContent = i + 1;
       d.onclick = () => { stopPlay(); state.idx = i; revealed = (state.reveal === 'always'); applyReveal(); render(); };
       els.dots.appendChild(d);
     });
-    renderList(g);
+    renderList(items);
     renderChips();
     applyReveal();
   }
 
-  function renderList(g){
+  function renderList(items){
     els.listRows.innerHTML = '';
-    g.group.forEach((it, i) => {
+    items.forEach((it, i) => {
       const row = document.createElement('div');
-      row.className = 'row' + (i === state.idx ? ' cur' : '');
+      const marked = state.missed.includes(it.c);
+      row.className = 'row' + (i === state.idx ? ' cur' : '') + (marked ? ' missed' : '');
       row.innerHTML = '<div class="no">' + (i+1) + '</div><div class="c">' + it.c + '</div>' +
         '<div class="w">' + it.w.map(w => '<span>' + w + '</span>').join('') + '</div>' +
         '<button class="spk" aria-label="朗读"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zm12.5 3a4.5 4.5 0 0 0-2-3.74v7.48A4.5 4.5 0 0 0 16.5 12zm-2-8v2.06A7 7 0 0 1 19.5 12a7 7 0 0 1-5 6.94V21a9 9 0 0 0 7-9 9 9 0 0 0-7-9z"/></svg></button>';
@@ -690,17 +774,25 @@
 
   function playCurrent(){
     if(!playing) return;
-    const g = groupInfo();
-    const it = g.group[state.idx];
+    const items = currentItems();
+    const it = items[state.idx];
     if(!it){ return; }
+    if(state.reveal === 'auto'){ revealed = false; applyReveal(); }
     speakItem(it, () => {
       if(!playing) return;
       if(state.reveal === 'auto'){ revealed = true; applyReveal(); }
       waitTimer = setTimeout(() => {
         if(!playing) return;
+        const len = currentItems().length;
+        if(state.idx >= len - 1){
+          nextRound();
+          revealed = (state.reveal === 'always');
+          applyReveal(); render();
+          playCurrent();
+          return;
+        }
         state.idx++;
-        if(state.idx >= g.group.length){ state.idx = 0; }
-        revealed = (state.reveal === 'always') || (state.reveal === 'auto');
+        revealed = (state.reveal === 'always');
         applyReveal(); render();
         playCurrent();
       }, Math.max(1, Number(state.interval) || 8) * 1000);
@@ -731,10 +823,17 @@
   function go(delta){
     const wasPlaying = playing;
     stopPlay(true);
-    const g = groupInfo();
-    state.idx = (state.idx + delta + g.group.length) % g.group.length;
-    revealed = (state.reveal === 'always');
-    applyReveal(); render();
+    const items = currentItems();
+    if(!items.length) return;
+    if(delta > 0 && state.idx >= items.length - 1){
+      nextRound();
+      revealed = (state.reveal === 'always');
+      applyReveal(); render();
+    } else {
+      state.idx = (state.idx + delta + items.length) % items.length;
+      revealed = (state.reveal === 'always');
+      applyReveal(); render();
+    }
     if(wasPlaying){ setPlayingUI(true); requestWakeLock(); playCurrent(); }
   }
 
@@ -748,6 +847,32 @@
     revealed = false; applyReveal();
     speakItem(currentItem());
   }
+  let unknownLock = false;
+  function markUnknown(){
+    if(unknownLock) return;
+    unknownLock = true;
+    setTimeout(() => { unknownLock = false; }, 300);
+    const it = currentItem();
+    if(!it) return;
+    if(!state.missed.includes(it.c)){
+      state.missed.push(it.c);
+      save();
+    }
+    const wasPlaying = playing;
+    stopPlay(true);
+    const items = currentItems();
+    if(state.idx >= items.length - 1){
+      nextRound();
+      revealed = (state.reveal === 'always');
+      applyReveal(); render();
+    } else {
+      state.idx++;
+      revealed = (state.reveal === 'always');
+      applyReveal(); render();
+      toast('已加入下一轮复习');
+    }
+    if(wasPlaying){ setPlayingUI(true); requestWakeLock(); playCurrent(); }
+  }
   function completeGroup(){
     const g = groupInfo();
     const p = prog();
@@ -755,6 +880,8 @@
     if(next >= g.total) next = 0;
     p.offset = next;
     p.date = todayStr();
+    state.roundChars = null;
+    state.missed = [];
     save();
     stopPlay();
     state.idx = 0;
@@ -770,7 +897,10 @@
     if(prev < 0){
       prev = Math.floor((g.total - 1) / DAY_SIZE) * DAY_SIZE;
     }
-    p.offset = prev; save();
+    p.offset = prev;
+    state.roundChars = null;
+    state.missed = [];
+    save();
     stopPlay(); state.idx = 0; revealed = (state.reveal === 'always');
     render();
     toast(fmtDay(groupInfo().day));
@@ -779,6 +909,8 @@
     if(!confirm('重置「' + book().name + ' · ' + kindName() + '」的进度？\n会从第 1 天重新开始。')) return;
     delete state.progress[keyOf()];
     delete state.random[keyOf()];
+    state.roundChars = null;
+    state.missed = [];
     save(); stopPlay(); state.idx = 0;
     closeSheet();
     render(); toast('已重置本册进度');
@@ -788,6 +920,8 @@
   }
   function reshuffle(){
     delete state.random[keyOf()];
+    state.roundChars = null;
+    state.missed = [];
     save(); stopPlay(); state.idx = 0;
     if(state.order === 'seq'){ state.order = 'random'; save(); }
     render(); toast('已打乱本册顺序');
@@ -811,7 +945,12 @@
   function bindSeg(seg, key, cast){
     seg.querySelectorAll('button').forEach(btn => {
       btn.onclick = () => {
+        const oldVal = state[key];
         state[key] = cast ? cast(btn.dataset.v) : btn.dataset.v;
+        if(key === 'order' && oldVal !== state[key]){
+          state.roundChars = null;
+          state.missed = [];
+        }
         save(); syncSettingUI();
         if(key === 'reveal'){ stopPlay(true); revealed = (state.reveal === 'always'); render(); }
         if(key === 'order'){ stopPlay(true); state.idx = 0; revealed = (state.reveal === 'always'); render(); }
@@ -840,6 +979,7 @@
   els.revealBtn.onclick = revealToggle;
   els.charCard.onclick = revealToggle;
   els.repeatBtn.onclick = repeatOne;
+  els.unknownBtn.onclick = markUnknown;
   els.doneBtn.onclick = completeGroup;
   els.prevGroupBtn.onclick = prevGroup;
   els.shuffleBtn.onclick = reshuffle;
@@ -867,8 +1007,11 @@
   } else {
     initVoices();
   }
-  if(!BOOKS.some(b => b.id === state.book)) state.book = BOOKS[0].id;
-  if(!['xie','ren','all'].includes(state.kind)) state.kind = 'xie';
+  if(!BOOKS.some(b => b.id === state.book)){ state.book = BOOKS[0].id; state.roundChars = null; state.missed = []; }
+  if(!['xie','ren','all'].includes(state.kind)){ state.kind = 'xie'; state.roundChars = null; state.missed = []; }
+  state.missed = uniqChars(state.missed);
+  state.roundChars = uniqChars(state.roundChars);
+  if(!state.roundChars.length) state.roundChars = null;
   syncSettingUI();
   render();
   if(state.reveal === 'always'){ revealed = true; applyReveal(); }
